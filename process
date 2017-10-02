@@ -1,0 +1,4 @@
+#!/bin/sh
+source=src/participant.py
+chmod +x $source
+python $source $1 $2 $3

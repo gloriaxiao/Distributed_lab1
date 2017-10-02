@@ -1,0 +1,9 @@
+#!/bin/bash
+PIDS=`ps aux | grep 'participant.py' | grep -v 'grep' | awk '{print $2}'`
+echo $PIDS
+if [ -z "$PIDS" ] 
+	then
+		echo "No process running participant.py"
+	else
+		kill $PIDS
+fi
