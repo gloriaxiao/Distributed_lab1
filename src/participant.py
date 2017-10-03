@@ -29,6 +29,7 @@ ABORT = "ABORT"
 
 class MasterListener(Thread):
 	def __init__(self, pid, port):
+		global alives
 		Thread.__init__(self)
 		self.pid = pid
 		self.port = port
@@ -37,15 +38,21 @@ class MasterListener(Thread):
 		self.socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
 		self.socket.bind((ADDR, self.port))
 		self.socket.listen(1)
-		self.master_sock, _ = self.socket.accept()
-		self.connected = True
+		
 
 	def run(self):
 		global alives, isCoordinator, DTlog
+		self.master_sock, _ = self.socket.accept()
+		self.connected = True
 		# First participant
 		if not alives:
+			sys.stdout.write('not alive processes')
+			sys.stdout.flush()
 			isCoordinator = True
 			self.master_sock.send("coordinator {:d}\n".format(self.pid))
+		else:
+			sys.stdout.write(alives)
+			sys.stdout.flush()
 		while self.connected:
 			if '\n' in self.buffer:
 				(l, rest) = self.buffer.split("\n", 1)
@@ -68,7 +75,8 @@ class MasterListener(Thread):
 				elif cmd == "add" and isCoordinator:
 					broadcast("VOTEREQ {}\n".format(self.l))
 					DTlog.append("Start-3PC")
-					print("Start-3PC")
+					sys.stdout.write("Start-3PC")
+					sys.stdout.flush()
 					
 				elif cmd == "delete" and isCoordinator:
 					pass
@@ -80,7 +88,8 @@ class MasterListener(Thread):
 				elif cmd == "crashPartialCommit":
 					pass
 				else:
-					print "Unknown command {}".format(l)
+					sys.stdout.write("Unknown command {}".format(l))
+					sys.stdout.flush()
 			else:
 				try:
 					self.buffer += self.master_sock.recv(BUFFER_SIZE)
@@ -126,28 +135,29 @@ def reply(target_pid, msg):
 # 	global wait_ack
 # 	time.sleep(TIMEOUT)
 # 	if wait_ack:
-# 		print("Timeout!")
+# 		sys.stdout.write("Timeout!")
 # 		abort()
 
 
 class serverListener(Thread):
 
 	def __init__(self, pid, port, target_pid):
-		global alives
 		self.pid = pid
 		self.listen_port = port
 		self.sock = socket(AF_INET, SOCK_STREAM)
 		self.sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
 		self.sock.bind((ADDR, port))
-		self.listen(1)
-		self.conn_sock, addr = sock.accept()
-		_, target_port = addr #For debugging
-		alives.add(target_pid)
+		self.sock.listen(1)
+		sys.stdout.write("Starts listening on port {:d} for process {:d}\n".format(port, target_pid))
+		sys.stdout.flush()
 		self.buffer = ""
-		self.connected = True
 
 	def run(self):
 		global DTlog, alives, COOR_ID
+		self.conn_sock, addr = self.sock.accept()
+		_, target_port = addr #For debugging
+		alives.add(target_pid)
+		self.connected = True
 		while True:
 			if "\n" in self.buffer:
 				(l, rest) = self.buffer.split("\n", 1)
@@ -208,7 +218,19 @@ class serverClient(Thread):
 		alives.add(self.target_pid)
 
 	def run(self):
-		pass
+		while True:
+			try:
+				new_socket = socket(AF_INET, SOCK_STREAM)
+				new_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+				new_socket.bind((ADDR, self.port))
+				new_socket.connect((ADDR, self.target_port))
+				break
+			except:
+				pass
+		self.sock = new_socket
+		self.connected = True
+		self.buffer = ""
+		alives.add(self.target_pid)
 
 	def send(self, msg):
 		if not msg.endswith("\n"):
@@ -237,6 +259,12 @@ def exit():
 def main(pid, num_servers, port):
 	global alive_ids
 	base_port = BASE_PORT + pid*num_servers*2
+	sys.stdout.write("BASE PORT for server {:d} is {:d}\n".format(pid, base_port))
+	sys.stdout.flush()
+	master_thread = MasterListener(pid, port)
+	master_thread.start()
+	sys.stdout.write("Start the master thread \n")
+	sys.stdout.flush()
 	for i in range(num_servers):
 		if i == pid:
 			continue
@@ -247,16 +275,18 @@ def main(pid, num_servers, port):
 		clients[i] = client
 		listener.start()
 		client.start()
-	master_thread = MasterListener(pid, port)
-	master_thread.start()
+
 
 
 if __name__ == '__main__':
 	args = sys.argv
 	if len(args) != 4:
-		print("Need three arguments!")
+		sys.stdout.write("Need three arguments!")
+		sys.stdout.flush()
 		os._exit(0)
 	try:
+		sys.stdout.write("start the program with {} {} {}\n".format(args[0], args[1], args[2]))
+		sys.stdout.flush()
 		main(int(args[1]), int(args[2]), int(args[3]))
 	except KeyboardInterrupt: 
 		os._exit(0)
