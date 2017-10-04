@@ -20,6 +20,17 @@ alives = {}
 DTlog = []
 self_pid = -1 
 votes = {} 
+max_num_servers = -1 
+master_thread = None 
+crashAfterVote = False 
+crashBeforeVote = False 
+crashAfterAck = False 
+crashVoteREQ = False 
+crashPartialCommit = False 
+crashPartialPreCommit = False 
+voteREQList = [] 
+partialCommitList = []
+partialPrecommitList = [] 
 
 # msg type
 VOTEREQ = "VOTEREQ"
@@ -45,22 +56,22 @@ class Heartbeat(Thread):
 			time.sleep(0.2)
 
 class MasterListener(Thread):
-	def __init__(self, pid, num_servers, port):
+	def __init__(self, pid, port):
 		global alives
 		Thread.__init__(self)
 		self.pid = pid
-		self.num_servers = num_servers
+		self.num_servers = max_num_servers
 		self.port = port
 		self.buffer = ""
 
-		base_port = BASE_PORT + pid*num_servers*2
+		base_port = BASE_PORT + pid*self.num_servers*2
 
-		for i in range(num_servers):
+		for i in range(self.num_servers):
 			if i != pid:
 				listeners[i] = ServerListener(pid, i)
 				listeners[i].start()
 
-		for i in range(num_servers): 
+		for i in range(self.num_servers): 
 			if (i != pid): 
 				clients[i] = ServerClient(pid, i) 
 				clients[i].start()
@@ -77,6 +88,7 @@ class MasterListener(Thread):
 
 	def run(self):
 		global alives, isCoordinator, DTlog, clients, votes, playlist
+		global crashAfterVote, crashBeforeVote, crashAfterAck
 		# First participant
 		if len(alives) == 0:
 			# sys.stdout.write('no alive processes {:d}\n'.format(self.pid))
@@ -97,14 +109,22 @@ class MasterListener(Thread):
 					url = playlist.get(msgs[1].strip(), 'NONE')
 					self.master_conn.send("resp {}\n".format(url))
 				elif cmd == "crash":
+					if isCoordinator: 
+						new_coordinator("")
 					self.kill()
 					exit()
 				elif cmd == "crashAfterVote":
-					pass
+					if not isCoordinator: 
+						global afterVote
+						afterVote = True 
 				elif cmd == "crashBeforeVote":
-					pass
+					if not isCoordinator: 
+						global beforeVote 
+						beforeVote = True 
 				elif cmd == "crashAfterAck":
-					pass
+					if not isCoordinator: 
+						global afterAck 
+						afterAck = True 
 				# For coordinator only
 				elif cmd == "add" or cmd == "delete":
 					if isCoordinator: 
@@ -148,11 +168,14 @@ class MasterListener(Thread):
 						else: 
 							self.master_conn.send("ack COMMIT\n")
 				elif cmd == "crashVoteREQ":
-					pass
+					crashVoteREQ = True 
+					voteREQList = msgs[1].split()
 				elif cmd == "crashPartialPreCommit":
-					pass
+					crashPartialPreCommit = True 
+					partialPrecommitList = msgs[1].split()
 				elif cmd == "crashPartialCommit":
-					pass
+					crashPartialCommit = True 
+					partialCommitList = msgs[1].split()
 				else:
 					sys.stdout.write("Unknown command {}".format(l))
 					sys.stdout.flush()
@@ -168,7 +191,7 @@ class MasterListener(Thread):
 		try:
 			self.connected = False
 			self.master_conn.close()
-			self.socket.close()
+			# self.socket.close()
 		except:
 			pass
 
@@ -180,6 +203,16 @@ def broadcast(msg):
 				client.send(msg)
 			except:
 				pass
+
+def new_coordinator(l): 
+	global max_num_servers, clients, alives 
+	if isCoordinator: 
+		next = (self_pid + 1) % max_num_servers
+		while next != self_pid: 
+			if next in alives: 
+				clients[next].send("new " + l) 
+				break; 
+			next = (next + 1) % max_num_servers 
 
 def commit(l):
 	if isCoordinator:
@@ -225,7 +258,7 @@ class ServerListener(Thread):
 	def run(self): 
 		self.conn, self.addr = self.sock.accept()
 		self.connected = True 
-		global alives, DTlog, COOR_ID, votes
+		global alives, DTlog, COOR_ID, votes, crashAfterAck, crashAfterVote, crashBeforeVote
 		while True: 
 			if "\n" in self.buffer: 
 				(l, rest) = self.buffer.split("\n", 1)
@@ -235,6 +268,10 @@ class ServerListener(Thread):
 					alives[self.target_pid] = time.time()
 				elif msgs[0] == VOTEREQ:
 					COOR_ID = self.target_pid
+					if crashBeforeVote: 
+						master_thread.kill()
+						crashBeforeVote = False 
+						break; 
 					if msgs[1] == 'add':
 						name, url = msgs[2], msgs[3]
 						if len(url) > self.pid + 5:
@@ -253,6 +290,10 @@ class ServerListener(Thread):
 						else:
 							#Vote YES
 							reply(self.target_pid, "YES {:d}\n".format(self.pid))
+					if crashAfterVote: 
+						master_thread.kill()
+						crashAfterVote = False 
+						break; 
 				elif msgs[0] == "NO": 
 					votes[self.target_pid] = False 
 				elif msgs[0] == "YES": 
@@ -260,6 +301,10 @@ class ServerListener(Thread):
 				elif msgs[0] == PRECOMMIT: 
 					COOR_ID = self.target_pid
 					reply(self.target_pid, "ACK {:d}\n".format(self.pid))
+					if crashAfterAck: 
+						master_thread.kill()
+						crashAfterAck = False 
+						break; 
 				elif msgs[0] == COMMIT: 
 					COOR_ID = self.target_pid
 					if msgs[1] == 'add':
@@ -270,6 +315,11 @@ class ServerListener(Thread):
 						del playlist[name]
 				elif msgs[0] == "ACK": 
 					pass 
+				elif msgs[0] == "new": 
+					isCoordinator = True
+					print "coordinator " + str(self.pid)
+					self.conn.send("coordinator {:d}\n".format(self.pid))
+
 			else: 
 				try: 
 					data = self.conn.recv(1024)
@@ -285,7 +335,7 @@ class ServerListener(Thread):
 		try:
 			self.connected = False
 			self.conn.close()
-			self.sock.close()
+			# self.sock.close()
 		except:
 			pass
 
@@ -323,7 +373,7 @@ class ServerClient(Thread):
   			self.connected = False 
   			pass 
 
-	def kill(self):
+  def kill(self):
 		try:
 			self.connected = False
 			self.sock.close()
@@ -342,9 +392,10 @@ def exit():
 # n listeners and n clients:
 # From 20000 up, each process allocates 2n ports, the first n as listeners.
 def main(pid, num_servers, port):
-	global self_pid
+	global self_pid, max_num_servers, master_thread
 	self_pid = pid
-	master_thread = MasterListener(pid, num_servers, port)
+	max_num_servers = num_servers
+	master_thread = MasterListener(pid, port)
 	master_thread.start()
 	# sys.stdout.write("Start the master thread \n")
 	# sys.stdout.flush()
