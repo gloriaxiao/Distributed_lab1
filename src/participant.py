@@ -78,7 +78,7 @@ class MasterListener(Thread):
 
 	def run(self):
 		global alives, isCoordinator, DTlog, clients, votes, playlist
-		global crashAfterVote, crashBeforeVote, crashAfterAck
+		global crashAfterVote, crashBeforeVote, crashAfterAck, crashPartialCommit, crashPartialPreCommit, crashVoteREQ
 
 		# First client 
 		if len(alives) == 0:
@@ -213,6 +213,7 @@ class ServerListener(Thread):
 		self.buffer = ''
 
 	def run(self): 
+		global crashBeforeVote, waitForDecision,crashAfterAck, crashAfterVote
 		self.conn, self.addr = self.sock.accept()
 		self.connected = True 
 		while True: 
@@ -407,6 +408,7 @@ def broadcast(msg):
 
 
 def commit(msg):
+	global crashPartialCommit
 	if isCoordinator:
 		message = "{} {}".format(COMMIT, msg)
 		if crashPartialCommit:
@@ -419,6 +421,7 @@ def commit(msg):
 
 
 def pre_commit(msg):
+	global crashPartialPreCommit
 	if isCoordinator:
 		message = "{} {}".format(PRECOMMIT, msg)
 		if crashPartialPreCommit:
@@ -431,6 +434,7 @@ def pre_commit(msg):
 
 
 def vote_req(msg): 
+	global crashVoteREQ
 	if isCoordinator: 
 		message = "{} {}".format(VOTEREQ, msg)
 		if crashVoteREQ:
