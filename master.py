@@ -169,10 +169,8 @@ def main(debug=False):
             if debug:
                 process = subprocess.Popen(['./process', str(pid), sp2[2], sp2[3]], preexec_fn=os.setsid)
             else:
-                filename = "log_{:d}".format(pid)
-                process = subprocess.Popen(['./process', str(pid), sp2[2], sp2[3]], stdout=open(filename, 'w'),
-                    stderr=open(filename, 'w'), preexec_fn=os.setsid)
-
+                process = subprocess.Popen(['./process', str(pid), sp2[2], sp2[3]], stdout=open('/dev/null', 'w'),
+                    stderr=open('/dev/null', 'w'), preexec_fn=os.setsid)
             # sleep for a while to allow the process be ready
             time.sleep(3)
 
