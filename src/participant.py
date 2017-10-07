@@ -386,17 +386,6 @@ class ServerClient(Thread):
   	self.sock = None 
 
   def run(self):
-  	while True:
-  		try:
-  			new_socket = socket(AF_INET, SOCK_STREAM)
-			new_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-			new_socket.bind((ADDR, self.port))
-			new_socket.connect((ADDR, self.target_port))
-			self.sock = new_socket
-			alives[self.target_pid] = time.time()
-			break
-		except:
-			time.sleep(SLEEP)
   	while True: 
   		self.send(HEARTBEAT)
   		time.sleep(0.05)
@@ -410,17 +399,15 @@ class ServerClient(Thread):
   		if self.sock:
   			self.sock.close()
   			self.sock = None
-  		while True:
-	  		try:
-	  			new_socket = socket(AF_INET, SOCK_STREAM)
-				new_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-				new_socket.bind((ADDR, self.port))
-				new_socket.connect((ADDR, self.target_port))
-				self.sock = new_socket
-				alives[self.target_pid] = time.time()
-				break
-			except:
-				time.sleep(SLEEP)
+  		try:
+  			new_socket = socket(AF_INET, SOCK_STREAM)
+			new_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+			new_socket.bind((ADDR, self.port))
+			new_socket.connect((ADDR, self.target_port))
+			self.sock = new_socket
+			alives[self.target_pid] = time.time()
+		except:
+			time.sleep(SLEEP)
 
   def kill(self):
 		try:
