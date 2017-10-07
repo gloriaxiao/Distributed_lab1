@@ -177,13 +177,14 @@ class MasterListener(Thread):
 					else:
 						_, msgs = l.split(None, 1)
 						partialPreCommitIDs = set([int(val) for val in msgs.split() if val])
+						print partialPrecommitIDs
 				elif cmd == "crashPartialCommit" and isCoordinator:
 					crash.crashPartialCommit = True 
 					if l == cmd:
 						partialCommitIDs = set()
 					else:
 						_, msgs = l.split(None, 1)
-						partialCommitIDs = set([int(val) for val in msgs.split() if val])
+						partialCommitIDs = set([int(val) for val in msgs.split()])
 				# For coordinator only
 				elif cmd == "add" or cmd == "delete":
 					print "run 3pc protocol"
@@ -513,7 +514,7 @@ def timeout():
 			if not starttime:
 				# set the start time of the countdown process
 				starttime = time.time()
-				print "{:d} set start time to {:f}".format(self_pid, starttime)
+				# print "{:d} set start time to {:f}".format(self_pid, starttime)
 			elif (time.time() - starttime) > TIMEOUT:
 				# Timeout
 				countDown.stop()
@@ -669,7 +670,7 @@ def broadcast(msg):
 
 
 def commit(msg, state_resp=False):
-	global crash, DTlog, states, COMMIT, localstate, self_pid
+	global crash, DTlog, states, COMMIT, localstate, self_pid, partialCommitIDs
 	message = "COMMIT {}\n".format(msg)
 	DTlog.append(message)
 	localstate = COMMIT
@@ -689,7 +690,7 @@ def commit(msg, state_resp=False):
 
 
 def pre_commit(msg, state_resp=False):
-	global crash, states 
+	global crash, states, partialPrecommitIDs
 	message = "PRECOMMIT {}\n".format(msg)
 	if state_resp:
 		message = 'STATERESP ' + message
@@ -699,6 +700,7 @@ def pre_commit(msg, state_resp=False):
 	if crash.crashPartialPreCommit:
 		crash.crashPartialPreCommit = False
 		for pid in partialPrecommitIDs:
+			print "{:d} to {:d} {}".format(self_pid, pid, message)
 			reply(pid, message)
 		exit()
 	else:
@@ -758,7 +760,6 @@ def load_DTlog():
 			DTlog = [line for line in file if line]
 		alives_before = set([int(val) for val in DTlog[0].split() if val != 'ALIVES'])
 		# TODO: send state request to all alives
-
 		# Wait for response before restarting
 	except:
 		pass
