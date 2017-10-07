@@ -348,7 +348,7 @@ class ServerListener(Thread):
 				elif msgs[0] == "STATE":
 					_, info = l.split(None, 1)
 					# state response
-					print "Receive state {} from {:d}".format(info, self.target_pid)
+					print str(self_pid) + " Receive state {} from {:d}".format(info, self.target_pid)
 					states[self.target_pid] = info
 				elif msgs[0] == ELECT:
 					# Elected as the new coordinator
@@ -360,16 +360,21 @@ class ServerListener(Thread):
 				try: 
 					data = self.conn.recv(1024)
 					if data == "": 
-						raise ValueError
+						raise ValueError 
+					# elif data.beginswith(STATERESP): 
+					# 	print str(self_pid) + " received " + data
+					if "STATERESP" in data: 
+						print str(self_pid) + " received " + data + " from " + str(self.target_pid)
 					self.buffer += data 
 				except Exception as e:
+					print str(self_pid) + " to " + str(self.target_pid) + " connection closed"
 					self.conn.close()
 					self.conn = None 
 					self.conn, self.addr = self.sock.accept()
 
 	def kill(self):
 		try:
-			self.sock.close()
+			# self.sock.close()
 			self.conn.close()
 		except:
 			pass
@@ -402,7 +407,7 @@ class ServerClient(Thread):
   		try:
   			new_socket = socket(AF_INET, SOCK_STREAM)
 			new_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-			new_socket.bind((ADDR, self.port))
+			# new_socket.bind((ADDR, self.port))
 			new_socket.connect((ADDR, self.target_port))
 			self.sock = new_socket
 			alives[self.target_pid] = time.time()
@@ -507,45 +512,46 @@ def timeout():
 				countDown.stop()
 				starttime = 0 
 				if wait.waitForState:
-					print "Timeout waiting for State Info"
+					print str(self_pid) + " Timeout waiting for State Info"
 					wait.waitForState = False
 					run_3PC_termination()
 				elif wait.waitForStateReq:
-					print "Timeout waiting for State Request"
+					print str(self_pid) + " Timeout waiting for State Request"
 					wait.waitForStateReq = False
 					run_election()
 				elif wait.waitForStateResp:
-					print "Timeout waiting for State Response from Coor"
+					print str(self_pid) + " Timeout waiting for State Response from Coor" + str(COOR_ID)
 					wait.waitForStateResp = False
+					# if COOR_ID not in alives: 
 					run_election()
 				elif wait.waitForVote:
-					print "Timeout waiting for votes"
+					print str(self_pid) + " Timeout waiting for votes"
 					wait.waitForVote = False
 					master_thread.master_conn.send("ack ABORT\n")
 					abort(wait.waiting_cmd)
 					wait.waiting_cmd = ""
 					votes = {}
 				elif wait.waitForVoteReq:
-					print "Timeout waiting for vote requests"
+					print str(self_pid) + " Timeout waiting for vote requests"
 					DTlog.append("ABORT TIMEOUT VOTEREQ\n")
 					localstate = ABORT
 					wait.waitForVoteReq = False
 					return
 				elif wait.waitForPreCommit:
-					print "Timeout waiting for precommit"
+					print str(self_pid) + " Timeout waiting for precommit"
 					DTlog.append("ABORT TIMEOUT PRECOMMIT\n")
 					wait.waitForPreCommit = False
 					localstate = UNCERTAIN
 					run_election()
 				elif wait.waitForCommit:
-					print "Timeout waiting for commit"
+					print str(self_pid) + " Timeout waiting for commit"
 					DTlog.append("COMMIT TIMEOUT COMMIT\n")
 					wait.waitForCommit = False
 					localstate = COMMITTABLE
 					run_election()
 			elif wait.waitForVote:
 				if not (vote_reqs - set(votes.keys())):
-					print "get all votes"
+					print str(self_pid) + " get all votes"
 					cmd = wait.waiting_cmd
 					wait.waitForVote = False
 					wait.waiting_cmd = ""
@@ -554,7 +560,7 @@ def timeout():
 					run_3PC(cmd)
 			elif wait.waitForState:
 				if not (state_reqs - set(states.keys())):
-					print "get all states"
+					print str(self_pid) + " get all states"
 					wait.waitForState = False
 					wait.waiting_cmd = ""
 					countDown.stop()
@@ -572,6 +578,8 @@ def timeout():
 def run_election(): 
 	global clients, alives, COOR_ID, max_num_servers, wait, died_coor, self_pid
 	global ELECT
+	if COOR_ID in alives: 
+		return
 	new_coor = (COOR_ID + 1) % max_num_servers
 	died_coor.add(COOR_ID)
 	if COOR_ID in alives:
