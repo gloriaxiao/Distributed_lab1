@@ -22,7 +22,11 @@ COMMITTABLE = "COMMITTABLE"
 UNCERTAIN = "UNCERTAIN"
 ABORT = "ABORT"
 HEARTBEAT = "heartbeat"
+COOR_HEARTBEAT = "coor_heartbeat"
 ELECT = "URELECT"
+RESTART_REQ = "RESTARTREQ"
+RESTART_RESP = "RESTARTRESP"
+WAIT = 'WAIT'
 
 # Global Variables
 DTlog = []
@@ -53,12 +57,16 @@ localstate = ABORT
 
 # 3PC instances
 in3PC = False
-num_3PC = 0
-
 # container class variables
 wait = None
 countDown = None
 crash = None
+
+# Restart Variable
+wait_for = set()
+wait_to_restart = set()
+blocked = False
+crashtime = -1
 
 # Threads
 listeners = {}
@@ -66,6 +74,7 @@ clients = {}
 master_thread = None 
 heartbeat_thread = None
 timeout_thread = None
+
 
 class CountDown:
 	def __init__(self):
@@ -152,6 +161,7 @@ class MasterListener(Thread):
 			COOR_ID = self.pid
 			print "coordinator {:d}".format(self.pid)
 			self.master_conn.send("coordinator {:d}\n".format(self.pid))
+			restore_state()
 		while self.connected:
 			if '\n' in self.buffer:
 				(l, rest) = self.buffer.split("\n", 1)
@@ -161,7 +171,6 @@ class MasterListener(Thread):
 					_, msgs = l.split(None, 1)
 					url = playlist.get(msgs.strip(), 'NONE')
 					self.master_conn.send("resp {}\n".format(url))
-				# crashes
 				elif cmd == "crashAfterVote":
 					crash.crashAfterVote = True
 				elif cmd == "crashBeforeVote":
@@ -172,6 +181,7 @@ class MasterListener(Thread):
 					print "handle crash"
 					exit()
 					break
+				# For coordinator only
 				elif cmd == "crashVoteREQ" and isCoordinator:
 					crash.crashVoteREQ = True
 					if l == cmd:
@@ -187,8 +197,6 @@ class MasterListener(Thread):
 					else:
 						_, msgs = l.split(None, 1)
 						partialPreCommitIDs = set([int(val) for val in msgs.split()])
-						print 'After adding'
-						print partialPreCommitIDs
 				elif cmd == "crashPartialCommit" and isCoordinator:
 					crash.crashPartialCommit = True 
 					if l == cmd:
@@ -196,7 +204,6 @@ class MasterListener(Thread):
 					else:
 						_, msgs = l.split(None, 1)
 						partialCommitIDs = set([int(val) for val in msgs.split()])
-				# For coordinator only
 				elif cmd == "add" or cmd == "delete":
 					print "run 3pc protocol"
 					self.start_VoteREQ(l)
@@ -211,10 +218,10 @@ class MasterListener(Thread):
 					break 
 
 	def start_VoteREQ(self, l):
-		global votes, vote_reqs, alives, wait, in3PC, num_3PC
+		global votes, vote_reqs, alives, wait, in3PC, DTlog
 		# Keep track of the set of alive process at the time of VOTEREQ
 		in3PC = True
-		num_3PC += 1
+		# DTlog.append('START3PC {:f}\n'.format(time.time()))
 		vote_req(l)
 		wait.waitForVote = True
 		wait.waiting_cmd = l
@@ -244,8 +251,8 @@ class ServerListener(Thread):
 		self.buffer = ''
 
 	def run(self): 
-		global countDown, wait, crash, DTlog, died_coor, isCoordinator
-		global localstate, COOR_ID, alives, playlist, in3PC, num_3PC, states
+		global countDown, wait, crash, DTlog, died_coor, isCoordinator, wait_for
+		global localstate, COOR_ID, alives, playlist, in3PC, states, wait_to_restart
 		self.conn, self.addr = self.sock.accept()
 		self.connected = True 
 		wait.waitForVoteReq = (not isCoordinator)
@@ -254,9 +261,17 @@ class ServerListener(Thread):
 				(l, rest) = self.buffer.split("\n", 1)
 				self.buffer = rest
 				msgs = l.split()
-				if msgs[0] == HEARTBEAT: 
+				if msgs[0] == HEARTBEAT:
+					if self.target_pid in wait_to_restart:
+						try:
+							del alives[self.target_pid]
+						except:
+							pass
+					else:
+						alives[self.target_pid] = time.time()
+				elif msgs[0] == COOR_HEARTBEAT:
+					COOR_ID = self.target_pid
 					alives[self.target_pid] = time.time()
-					continue
 				elif msgs[0] == STATEREQ:
 					print "{:d} receives state req from {:d}".format(self.pid, self.target_pid)
 					if COOR_ID != self.target_pid:
@@ -276,7 +291,7 @@ class ServerListener(Thread):
 					wait.waitForVoteReq = False
 					_, info = l.split(None, 1)
 					in3PC = True
-					num_3PC += 1
+					# DTlog.append('START3PC {:f}\n'.format(time.time()))
 					cmd = msgs[1]
 					if crash.crashBeforeVote:
 						crash.crashBeforeVote = False 
@@ -379,7 +394,7 @@ class ServerListener(Thread):
 				elif msgs[0] == "ACK":
 					if wait.waitForACK:
 						wait.waitForACK = False
-						print str(self_pid) + " going to finish commit after receivign all ACK"
+						print str(self_pid) + " going to finish commit after receiving ACKs"
 						finish_commit(wait.waiting_cmd)
 						wait.waiting_cmd = ""
 				elif msgs[0] == "STATE":
@@ -393,13 +408,29 @@ class ServerListener(Thread):
 					COOR_ID = self.pid
 					print "receive Election " + str(self.pid)
 					start_STATEREQ()
+				elif msgs[0] == RESTARTREQ:
+					if in3PC:
+						# Need to wait until
+						wait_to_restart.add(self.target_pid)
+					else:
+						if blocked:
+							continue
+						log = ''.join(DTlog)
+						reply(self.target_pid, "{} {}".format(RESTARTRESP, log))
+				elif msgs[0] == RESTARTRESP:
+					_, msg = l.split(None, 1)
+					logs = msg.split('\n')
+					process_recieved_log(logs)
+				elif msgs[0] == 'RESTARTWAIT':
+					_, ids = l.split(None, 1)
+					wait_to_restart = set([int(v) for v in ids.split() if v])
 			else:
 				try: 
 					data = self.conn.recv(1024)
 					if data == "": 
-						raise ValueError 
-					if "STATERESP" in data: 
-						print str(self_pid) + " received " + data + " from " + str(self.target_pid)
+						raise ValueError
+					# if "STATERESP" in data: 
+					# 	print str(self_pid) + " received " + data + " from " + str(self.target_pid)
 					self.buffer += data 
 				except Exception as e:
 					print str(self_pid) + " to " + str(self.target_pid) + " connection closed"
@@ -428,14 +459,18 @@ class ServerClient(Thread):
   	self.sock = None 
 
   def run(self):
-  	while True: 
-  		self.send(HEARTBEAT)
+  	global isCoordinator
+  	while True:
+  		if isCoordinator:
+  			self.send(COOR_HEARTBEAT)
+  		else:
+  			self.send(HEARTBEAT)
   		time.sleep(0.05)
 
   def send(self, msg): 
   	if not msg.endswith("\n"): 
   		msg = msg + "\n"
-  	try: 
+  	try:
   		self.sock.send(msg)
   	except Exception as e:
   		if self.sock:
@@ -457,6 +492,7 @@ class ServerClient(Thread):
 		except:
 			pass
 
+
 class Heartbeat(Thread): 
 	def __init__(self, index): 
 		Thread.__init__(self)
@@ -472,6 +508,44 @@ class Heartbeat(Thread):
 					new_alives[key] = alives[key]
 			alives = new_alives
 			time.sleep(0.2)
+
+
+def process_received_log(log):
+	global DTlog, blocked, playlist, localstate, wait_for
+	local_cmds = set()
+	for line in DTlog:
+		if not line:
+			continue
+		state, cmd = line.split(None, 1)
+		if state == COMMIT or state == ABORT:
+			local_cmds.add(cmd)
+	for line in log:
+		if not line:
+			continue
+		state, cmd = line.split(None, 1)
+		if cmd not in local_cmds:
+			DTlog.append(line)
+			if state == COMMIT:
+				localstate = COMMIT
+				# Commit on cmd
+				op, info = line.split(None, 1)
+				if op == 'add':
+					name, url = info.split()
+					playlist[name] = url
+				else:
+					try:
+						del playlist[info]
+					except:
+						pass
+			elif state == ABORT:
+				localstate = ABORT
+			else:
+				localstate = UNCERTAIN
+	blocked = False
+	wait_for = set()
+	# If it's the coordinator, need to run termination protocol
+	if isCoordinator:
+		run_3PC_termination()
 
 
 def remove_zombies(new_coor_id):
@@ -526,23 +600,24 @@ def run_3PC(l):
 
 
 def finish_commit(l, state_resp=False):
-	global master_thread, playlist, in3PC
+	global master_thread, playlist, in3PC, wait_to_restart, DTlog
 	args = l.split()
 	cmd, name = args[0], args[1]
-	# After receiving the ACKs
 	if cmd == "add":
 		print "add {} {} in finish_commit".format(name, args[2])
 		playlist[name] = args[2]
 	else:
-		# catch the case that delete item doesn't exist
 		try: 
-			# print "Move on with deletion"
 			del playlist[name]
 		except:
 			pass
 	master_thread.master_conn.send("ack COMMIT\n")
 	commit(l, state_resp=state_resp)
+	for pid in wait_to_restart:
+		log = ''.join(DTlog)
+		reply(pid, "{} {}".format(RESTARTRESP, log))
 	in3PC = False
+	wait_to_restart = set()
 
 
 def timeout():
@@ -634,15 +709,19 @@ def timeout():
 
 def run_election(): 
 	global clients, alives, COOR_ID, max_num_servers, wait, died_coor, self_pid
-	global ELECT
-	if COOR_ID in alives: 
-		return
+	global ELECT, isCoordinator, wait_to_restart
+	# if COOR_ID in alives: 
+	# 	return
 	new_coor = (COOR_ID + 1) % max_num_servers
 	died_coor.add(COOR_ID)
 	if COOR_ID in alives:
 		del alives[COOR_ID]
 	while new_coor != COOR_ID: 
-		if new_coor in alives: 
+		if new_coor in alives:
+			if isCoordinator and wait_to_restart:
+				# Transfer all waiting to restart processes
+				msg = 'RESTARTWAIT {}'.format(' '.join([str(v) for v in wait_to_restart]))
+				clients[new_coor].send(RESTARTWAIT)
 			clients[new_coor].send(ELECT)
 			if new_coor in died_coor:
 				died_coor.remove(new_coor)
@@ -681,8 +760,8 @@ def run_3PC_termination():
 		abort(cmd, state_resp=True)
 		return
 	uncertain_pids = set()
-	print len(states)
-	print len(alives)
+	# print len(states)
+	# print len(alives)
 	has_committable = False
 	if len(alives) == 1: 
 		has_committable = True 
@@ -692,7 +771,6 @@ def run_3PC_termination():
 			# ignore process failures
 			continue
 		state, msg = info.split(None, 1)
-		# print "{} {} from {:d}".format(state, msg, pid)
 		if state == ABORT:
 			print str(self_pid) + " abort in termination when state is abort"
 			abort(msg, state_resp=True)
@@ -774,6 +852,7 @@ def pre_commit(msg, state_resp=False):
 	else:
 		broadcast(message)
 
+
 def abort(command, state_resp=False):
 	global votes, alives, clients, localstate, states, DTlog
 	if not command.endswith('\n'):
@@ -812,30 +891,68 @@ def reply(target_pid, msg):
 	global clients	
 	clients[target_pid].send(msg)
 
+
 def write_DTlog():
 	global DTlog, DT_PATH, alives, localstate
 	with open(DT_PATH, 'wt') as file:
-		# Write all alive processes
-		file.write('CRASHSTATE {}\n'.format(localstate))
+		# write crash time
+		# file.write('CRASHTIME {:f}'.format(time.time()))
 		alive_ids = [str(pid) for pid in alives]
+		# Write all alive processes
 		file.write('ALIVES {}\n'.format(' '.join(alive_ids)))
 		for line in DTlog:
-			if not line.endswith('\n'):
-				line = line + '\n'
 			file.write(line)
 
-def load_DTlog():
-	global DTlog, DT_PATH
+
+def restore_state():
+	global DTlog, DT_PATH, wait_for, crashtime, isCoordinator
+	global localstate, restart_resp, blocked, alives
 	try:
 		with open(DT_PATH, 'rt') as file:
-			DTlog = [line for line in file if line]
-		alives_before = set([int(val) for val in DTlog[0].split() if val != 'ALIVES'])
-		print len(listeners)
-		print len(clients)
-		# TODO: send state request to all alives
-		# Wait for response before restarting
+			# _, time = file.readline().split(None, 1)
+			# crashtime = float(time)
+			_, aliveset = file.readline().split(None, 1)
+			wait_for = set([int(val) for val in aliveset.split() if val])
+			for line in file:
+				DTlog.append(line)
 	except:
 		pass
+	# coordinator start or total failure
+	if isCoordinator:
+		if not DTlog:
+			# start fresh
+			return
+		if not wait_for:
+			# last participant to die
+			statelog = DTlog[-1]
+			cmd, msg = statelog.split(None, 1)
+			if cmd == COMMIT or cmd == ABORT:
+				localstate = cmd
+			else:
+				localstate = COMMITTABLE
+			return
+		requested = set()
+		blocked = True
+		while blocked:
+			for pid in wait_for:
+				if pid in alives and pid not in requested:
+					reply(pid, RESTART_REQ)
+					requested.add(pid)
+			time.sleep(SLEEP)
+	# participant restart
+	else:
+		if DTlog:
+			statelog = DTlog[-1]
+			cmd, msg = statelog.split(None, 1)
+			if cmd == COMMIT or cmd == ABORT:
+				localstate = cmd
+			else:
+				localstate = UNCERTAIN
+		reply(COOR_ID, RESTART_REQ)
+		blocked = True
+		while blocked:
+			time.sleep(SLEEP)
+
 
 def make_sure_path_exists(path):
 	try:
@@ -853,7 +970,6 @@ def main(pid, num_servers, port):
 	max_num_servers = num_servers
 	DT_PATH = "DTlogs/log{:d}.txt".format(pid)
 	make_sure_path_exists("DTlogs")
-	load_DTlog()
 	countDown = CountDown()
 	wait = Wait()
 	crash = Crash()
@@ -867,7 +983,6 @@ def main(pid, num_servers, port):
 def exit():
 	global isCoordinator, listeners, clients, master_thread
 	if isCoordinator:
-		isCoordinator = False
 		run_election()
 	for key in listeners:
 		listeners[key].kill()
