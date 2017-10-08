@@ -8,8 +8,6 @@ import time
 from threading import Thread
 from socket import AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR, socket, error
 
-playlist_set = False
-
 # MASK VARIABLE
 TIMEOUT = 0.2
 SLEEP = 0.05
@@ -39,10 +37,8 @@ partialPreCommitIDs = set()
 # vote/state requests
 vote_reqs = set()
 state_reqs = set()
-playlist_reqs = set()
 votes = {}
 states = {}
-playlists = {} 
 
 # Coordinate states 
 isCoordinator = False
@@ -91,13 +87,12 @@ class Wait:
 		self.waitForCommit = False
 		self.waitForPreCommit = False
 		self.waitForACK = False
-		self.waitForPlaylist = False 
 		self.waiting_cmd = ""
 
 	def finished_waiting(self):
 		wait = self.waitForVote + self.waitForVoteReq + self.waitForState + \
 		self.waitForStateReq + self.waitForStateResp + self.waitForCommit + \
-		self.waitForPreCommit + self.waitForACK + self.waitForPlaylist
+		self.waitForPreCommit + self.waitForACK
 		return (not wait)
 
 	def reset(self):
@@ -109,7 +104,6 @@ class Wait:
 		self.waitForCommit = False
 		self.waitForPreCommit = False
 		self.waitForACK = False
-		self.waitForPlaylist = False 
 		self.waiting_cmd = ""
 
 
@@ -142,13 +136,6 @@ class MasterListener(Thread):
 		heartbeat_thread = Heartbeat(pid)
 		heartbeat_thread.setDaemon(True)
 		heartbeat_thread.start()
-
-		print "before playlist"
-
-		start_playlistREQ() 
-
-		print "after playlist"
-
 		self.socket = socket(AF_INET, SOCK_STREAM)
 		self.socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
 		self.socket.bind((ADDR, self.port))
@@ -270,13 +257,6 @@ class ServerListener(Thread):
 				if msgs[0] == HEARTBEAT: 
 					alives[self.target_pid] = time.time()
 					continue
-				elif msgs[0] == "playlist": 
-					if localstate != UNCERTAIN or localstate != COMMITTABLE: 
-						serialize = ""
-						for key in playlist: 
-							serialize = serialize + key + " " + playlist[key] + " "
-						reply(self.target_pid, "return {} {}".format(localstate, serialize))
-						print str(self_pid) + " responding to playlist to " + str(self.target_pid)
 				elif msgs[0] == STATEREQ:
 					print "{:d} receives state req from {:d}".format(self.pid, self.target_pid)
 					if COOR_ID != self.target_pid:
@@ -396,8 +376,6 @@ class ServerListener(Thread):
 					votes[self.target_pid] = False
 				elif msgs[0] == "YES": 
 					votes[self.target_pid] = True
-				elif msgs[0] == "return": 
-					playlists[self.target_pid] = l 
 				elif msgs[0] == "ACK":
 					if wait.waitForACK:
 						wait.waitForACK = False
@@ -645,32 +623,9 @@ def timeout():
 					countDown.stop()
 					starttime = 0
 					run_3PC_termination()
-			elif wait.waitForPlaylist: 
-				global playlist_reqs, playlists 
-				if not (playlist_reqs - set(playlists.keys())): 
-					potential_list = None 
-					for key in playlists: 
-						msgs = playlists[key].split()
-						if msgs[1] == COMMITTABLE or msgs[1] == UNCERTAIN: 
-							print "playlist useless since last round has not finished"
-							potential_list = None 
-							break 
-						if not potential_list: 
-							potential_list = {} 
-							for i in range(2, len(msgs), 2): 
-								potential_list[msgs[i]] = msgs[i + 1] 
-					if potential_list: 
-						playlist = potential_list
-						global playlist_set 
-						playlist_set = True 
-						wait.waitForPlaylist = False 
-						countDown.stop()
-						starttime = 0 
-					else: 
-						playlist_reqs = set()
 			elif wait.finished_waiting():
 				countDown.stop()
-				starttime = 0					
+				starttime = 0	
 			else:
 				time.sleep(SLEEP)
 		else:
@@ -712,13 +667,6 @@ def start_STATEREQ():
 	state_reqs = set(alives.keys())
 	broadcast(STATEREQ)
 	wait.waitForState = True
-	countDown.begin()
-
-def start_playlistREQ(): 
-	global master_thread, playlist_reqs, self_pid, wait, countDown
-	playlist_reqs = set(alives.keys())
-	broadcast("playlist")
-	wait.waitForPlaylist = True 
 	countDown.begin()
 
 
@@ -879,10 +827,8 @@ def write_DTlog():
 def load_DTlog():
 	global DTlog, DT_PATH
 	try:
-		print "loading begins"
 		with open(DT_PATH, 'rt') as file:
 			DTlog = [line for line in file if line]
-		print "loaded"
 		alives_before = set([int(val) for val in DTlog[0].split() if val != 'ALIVES'])
 		print len(listeners)
 		print len(clients)
@@ -907,10 +853,10 @@ def main(pid, num_servers, port):
 	max_num_servers = num_servers
 	DT_PATH = "DTlogs/log{:d}.txt".format(pid)
 	make_sure_path_exists("DTlogs")
+	load_DTlog()
 	countDown = CountDown()
 	wait = Wait()
 	crash = Crash()
-	load_DTlog()
 	master_thread = MasterListener(pid, num_servers, port)
 	master_thread.start()
 	timeout_thread = Thread(target=timeout, args=())
