@@ -8,6 +8,8 @@ import time
 from threading import Thread
 from socket import AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR, socket, error
 
+playlist_set = False
+
 # MASK VARIABLE
 TIMEOUT = 0.2
 SLEEP = 0.05
@@ -37,8 +39,10 @@ partialPreCommitIDs = set()
 # vote/state requests
 vote_reqs = set()
 state_reqs = set()
+playlist_reqs = set()
 votes = {}
 states = {}
+playlists = {} 
 
 # Coordinate states 
 isCoordinator = False
@@ -87,12 +91,13 @@ class Wait:
 		self.waitForCommit = False
 		self.waitForPreCommit = False
 		self.waitForACK = False
+		self.waitForPlaylist = False 
 		self.waiting_cmd = ""
 
 	def finished_waiting(self):
 		wait = self.waitForVote + self.waitForVoteReq + self.waitForState + \
 		self.waitForStateReq + self.waitForStateResp + self.waitForCommit + \
-		self.waitForPreCommit + self.waitForACK
+		self.waitForPreCommit + self.waitForACK + self.waitForPlaylist
 		return (not wait)
 
 	def reset(self):
@@ -104,6 +109,7 @@ class Wait:
 		self.waitForCommit = False
 		self.waitForPreCommit = False
 		self.waitForACK = False
+		self.waitForPlaylist = False 
 		self.waiting_cmd = ""
 
 
@@ -136,6 +142,13 @@ class MasterListener(Thread):
 		heartbeat_thread = Heartbeat(pid)
 		heartbeat_thread.setDaemon(True)
 		heartbeat_thread.start()
+
+		print "before playlist"
+
+		start_playlistREQ() 
+
+		print "after playlist"
+
 		self.socket = socket(AF_INET, SOCK_STREAM)
 		self.socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
 		self.socket.bind((ADDR, self.port))
@@ -157,7 +170,6 @@ class MasterListener(Thread):
 				(l, rest) = self.buffer.split("\n", 1)
 				self.buffer = rest
 				cmd = l.split()[0]
-				print l
 				if cmd == "get":
 					_, msgs = l.split(None, 1)
 					url = playlist.get(msgs.strip(), 'NONE')
@@ -200,7 +212,6 @@ class MasterListener(Thread):
 				# For coordinator only
 				elif cmd == "add" or cmd == "delete":
 					print "run 3pc protocol"
-					print l
 					self.start_VoteREQ(l)
 				else:
 					print "Unknown command {}".format(l)
@@ -259,6 +270,13 @@ class ServerListener(Thread):
 				if msgs[0] == HEARTBEAT: 
 					alives[self.target_pid] = time.time()
 					continue
+				elif msgs[0] == "playlist": 
+					if localstate != UNCERTAIN or localstate != COMMITTABLE: 
+						serialize = ""
+						for key in playlist: 
+							serialize = serialize + key + " " + playlist[key] + " "
+						reply(self.target_pid, "return {} {}".format(localstate, serialize))
+						print str(self_pid) + " responding to playlist to " + str(self.target_pid)
 				elif msgs[0] == STATEREQ:
 					print "{:d} receives state req from {:d}".format(self.pid, self.target_pid)
 					if COOR_ID != self.target_pid:
@@ -294,6 +312,7 @@ class ServerListener(Thread):
 							print "{:d} respond No on {}".format(self.pid, info)
 							reply(self.target_pid, "NO {:d}\n".format(self.pid))
 							vote_yes = False
+							print str(self_pid) + " changing local state to abort in vote"
 							localstate = ABORT
 							in3PC = False
 					if vote_yes:
@@ -315,6 +334,7 @@ class ServerListener(Thread):
 					wait.waitForPreCommit = False
 					_, info = l.split(None, 1)
 					localstate = COMMITTABLE
+					print str(self_pid) + " changing local state to commitable after receiving precommit"
 					if crash.crashAfterAck: 
 						crash.crashAfterAck = False 
 						exit()
@@ -334,6 +354,7 @@ class ServerListener(Thread):
 					in3PC = False
 					if msgs[1] == 'add':
 						name, url = msgs[2], msgs[3]
+						print str(self_pid) + " adding to playlist after receiving commit"
 						playlist[name] = url 
 					elif msgs[1] == 'delete':
 						try:
@@ -345,9 +366,26 @@ class ServerListener(Thread):
 					_, info = l.split(None, 1)
 					cmd, message = info.split(None, 1)
 					statelog = info + '\n'
+					print "cmd: " + cmd + " message: " + message + " statelog: " + statelog + " local state: " + localstate
 					if (cmd == ABORT or COMMIT):
+						print "in abort or commit" 
 						if statelog not in DTlog:
 							DTlog.append(statelog)
+						if localstate == COMMITTABLE: 
+							if cmd == ABORT: 
+								# TODO: if state is commitable and command is abort 
+								pass 
+							else: 
+								in3PC = False
+								data_pieces = message.split()
+								if data_pieces[0] == 'add': 
+									print str(self_pid) + " adding to playlist after receiving stateresp from coor"
+									playlist[data_pieces[1]] = data_pieces[2]
+								elif data_pieces[0] == 'delete':
+									try: 
+										del playlist[data_pieces[1]]
+									except: 
+										pass 
 						continue
 					else:
 						reply(self.target_pid, "ACK {:d}\n".format(self.pid))
@@ -358,9 +396,12 @@ class ServerListener(Thread):
 					votes[self.target_pid] = False
 				elif msgs[0] == "YES": 
 					votes[self.target_pid] = True
+				elif msgs[0] == "return": 
+					playlists[self.target_pid] = l 
 				elif msgs[0] == "ACK":
 					if wait.waitForACK:
 						wait.waitForACK = False
+						print str(self_pid) + " going to finish commit after receivign all ACK"
 						finish_commit(wait.waiting_cmd)
 						wait.waiting_cmd = ""
 				elif msgs[0] == "STATE":
@@ -379,10 +420,8 @@ class ServerListener(Thread):
 					data = self.conn.recv(1024)
 					if data == "": 
 						raise ValueError 
-					# elif data.beginswith(STATERESP): 
-					# 	print str(self_pid) + " received " + data
-					# if "STATERESP" in data: 
-					# 	print str(self_pid) + " received " + data + " from " + str(self.target_pid)
+					if "STATERESP" in data: 
+						print str(self_pid) + " received " + data + " from " + str(self.target_pid)
 					self.buffer += data 
 				except Exception as e:
 					print str(self_pid) + " to " + str(self.target_pid) + " connection closed"
@@ -477,9 +516,11 @@ def run_3PC(l):
 	global ack_reqs, wait, localstate, alives, in3PC, ABORT
 	if False in votes.values():
 		DTlog.append("ABORT {}\n".format(l))
+		print str(self_pid) + " changing local state to abort in run_3PC"
 		localstate = ABORT
 		master_thread.master_conn.send("ack ABORT\n")
 		votes = {}
+		print str(self_pid) + " abort in run_3PC when vote is false " + l
 		abort(l)
 		return
 	# all Yes
@@ -489,6 +530,7 @@ def run_3PC(l):
 	if cmd == "add" and len(args[2]) > self_pid + 5:
 		# Coordinator voted no
 		# print "abort on add"
+		print str(self_pid) + " abort in run_3PC when coor votes no " + l
 		abort(l)
 		return
 	# precommit and commit 
@@ -511,7 +553,7 @@ def finish_commit(l, state_resp=False):
 	cmd, name = args[0], args[1]
 	# After receiving the ACKs
 	if cmd == "add":
-		print "add {} {}".format(name, args[2])
+		print "add {} {} in finish_commit".format(name, args[2])
 		playlist[name] = args[2]
 	else:
 		# catch the case that delete item doesn't exist
@@ -555,12 +597,14 @@ def timeout():
 					print str(self_pid) + " Timeout waiting for votes"
 					wait.waitForVote = False
 					master_thread.master_conn.send("ack ABORT\n")
+					print str(self_pid) + " abort waitForVote "
 					abort(wait.waiting_cmd)
 					wait.waiting_cmd = ""
 					votes = {}
 				elif wait.waitForVoteReq:
 					print str(self_pid) + " Timeout waiting for vote requests"
 					DTlog.append("ABORT VOTEREQ\n")
+					print str(self_pid) + " changing local state to abort in wait.waitForVoteReq"
 					localstate = ABORT
 					wait.waitForVoteReq = False
 					return
@@ -574,6 +618,7 @@ def timeout():
 					print str(self_pid) + " Timeout waiting for commit"
 					# DTlog.append("COMMIT TIMEOUT COMMIT\n")
 					wait.waitForCommit = False
+					print str(self_pid) + " changing local state to commitable during timeout"
 					localstate = COMMITTABLE
 					run_election()
 				elif wait.waitForACK:
@@ -593,14 +638,39 @@ def timeout():
 			elif wait.waitForState:
 				if not (state_reqs - set(states.keys())):
 					print str(self_pid) + " get all states"
+					for key in states: 
+						print "pid: " + str(key) + " state: " + str(states[key])
 					wait.waitForState = False
 					wait.waiting_cmd = ""
 					countDown.stop()
 					starttime = 0
 					run_3PC_termination()
+			elif wait.waitForPlaylist: 
+				global playlist_reqs, playlists 
+				if not (playlist_reqs - set(playlists.keys())): 
+					potential_list = None 
+					for key in playlists: 
+						msgs = playlists[key].split()
+						if msgs[1] == COMMITTABLE or msgs[1] == UNCERTAIN: 
+							print "playlist useless since last round has not finished"
+							potential_list = None 
+							break 
+						if not potential_list: 
+							potential_list = {} 
+							for i in range(2, len(msgs), 2): 
+								potential_list[msgs[i]] = msgs[i + 1] 
+					if potential_list: 
+						playlist = potential_list
+						global playlist_set 
+						playlist_set = True 
+						wait.waitForPlaylist = False 
+						countDown.stop()
+						starttime = 0 
+					else: 
+						playlist_reqs = set()
 			elif wait.finished_waiting():
 				countDown.stop()
-				starttime = 0	
+				starttime = 0					
 			else:
 				time.sleep(SLEEP)
 		else:
@@ -644,6 +714,13 @@ def start_STATEREQ():
 	wait.waitForState = True
 	countDown.begin()
 
+def start_playlistREQ(): 
+	global master_thread, playlist_reqs, self_pid, wait, countDown
+	playlist_reqs = set(alives.keys())
+	broadcast("playlist")
+	wait.waitForPlaylist = True 
+	countDown.begin()
+
 
 def run_3PC_termination():	
 	# If any state report is aborted, coordinate writes and send abort
@@ -651,23 +728,29 @@ def run_3PC_termination():
 	uncertains = set()
 	statelog = DTlog[-1]
 	coor_state, cmd = statelog.split(None, 1)
-	print cmd
 	if coor_state == ABORT:
 		print 'Coordinator decides ABORT'
 		abort(cmd, state_resp=True)
 		return
 	uncertain_pids = set()
+	print len(states)
+	print len(alives)
 	has_committable = False
+	if len(alives) == 1: 
+		has_committable = True 
 	for pid, info in states.items():
+		print "pid: " + str(pid) + " info " + info 
 		if not info:
 			# ignore process failures
 			continue
 		state, msg = info.split(None, 1)
 		# print "{} {} from {:d}".format(state, msg, pid)
 		if state == ABORT:
+			print str(self_pid) + " abort in termination when state is abort"
 			abort(msg, state_resp=True)
 			return
 		elif state == COMMIT:
+			print str(self_pid) + " finishing commit in termination protocol when someone committed"
 			finish_commit(msg, state_resp=True)
 			return
 		elif state == UNCERTAIN:
@@ -675,10 +758,12 @@ def run_3PC_termination():
 		else:
 			has_committable = True
 	if coor_state == COMMIT:
+		print str(self_pid) + " finishing commit in termination protocol when coor is in commit state"
 		finish_commit(cmd, state_resp=True)
 		return
 	if not has_committable:
 		# all uncertain, abort
+		print str(self_pid) + " abort in termination when no committable"
 		abort(cmd, state_resp=True)
 	else:
 		for pids in uncertain_pids:
@@ -686,6 +771,7 @@ def run_3PC_termination():
 			msg = "STATERESP {} {}".format(PRECOMMIT, cmd)
 			reply(pid, msg)
 			time.sleep(SLEEP)
+		print str(self_pid) + " finishing commit in termination protocol when has committable"
 		finish_commit(cmd, state_resp=True)
 
 
@@ -746,6 +832,7 @@ def abort(command, state_resp=False):
 		command = command + '\n'
 	message = "ABORT {}".format(command)
 	DTlog.append(message)
+	print str(self_pid) + " changing local state to abort in abort"
 	localstate = ABORT
 	if state_resp:
 		message = 'STATERESP ' + message
@@ -792,9 +879,13 @@ def write_DTlog():
 def load_DTlog():
 	global DTlog, DT_PATH
 	try:
+		print "loading begins"
 		with open(DT_PATH, 'rt') as file:
 			DTlog = [line for line in file if line]
+		print "loaded"
 		alives_before = set([int(val) for val in DTlog[0].split() if val != 'ALIVES'])
+		print len(listeners)
+		print len(clients)
 		# TODO: send state request to all alives
 		# Wait for response before restarting
 	except:
@@ -816,10 +907,10 @@ def main(pid, num_servers, port):
 	max_num_servers = num_servers
 	DT_PATH = "DTlogs/log{:d}.txt".format(pid)
 	make_sure_path_exists("DTlogs")
-	load_DTlog()
 	countDown = CountDown()
 	wait = Wait()
 	crash = Crash()
+	load_DTlog()
 	master_thread = MasterListener(pid, num_servers, port)
 	master_thread.start()
 	timeout_thread = Thread(target=timeout, args=())
