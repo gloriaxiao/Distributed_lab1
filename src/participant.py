@@ -2,7 +2,7 @@
 """
 The participant program for CS5414 three phase commit project.
 """
-import os
+import os, errno
 import sys
 import time
 from threading import Thread
@@ -32,7 +32,7 @@ DT_PATH = ""
 # ID sets
 voteREQIDs = set()
 partialCommitIDs = set()
-partialPrecommitIDs = set()
+partialPreCommitIDs = set()
 
 # vote/state requests
 vote_reqs = set()
@@ -86,14 +86,25 @@ class Wait:
 		self.waitForStateResp = False
 		self.waitForCommit = False
 		self.waitForPreCommit = False
-		# self.waitForACK = False
+		self.waitForACK = False
 		self.waiting_cmd = ""
 
 	def finished_waiting(self):
 		wait = self.waitForVote + self.waitForVoteReq + self.waitForState + \
 		self.waitForStateReq + self.waitForStateResp + self.waitForCommit + \
-		self.waitForPreCommit
+		self.waitForPreCommit + self.waitForACK
 		return (not wait)
+
+	def reset(self):
+		self.waitForVote = False
+		self.waitForVoteReq = False
+		self.waitForState = False
+		self.waitForStateReq = False
+		self.waitForStateResp = False
+		self.waitForCommit = False
+		self.waitForPreCommit = False
+		self.waitForACK = False
+		self.waiting_cmd = ""
 
 
 class Crash:
@@ -176,8 +187,9 @@ class MasterListener(Thread):
 						partialPreCommitIDs = set()
 					else:
 						_, msgs = l.split(None, 1)
-						partialPreCommitIDs = set([int(val) for val in msgs.split() if val])
-						print partialPrecommitIDs
+						partialPreCommitIDs = set([int(val) for val in msgs.split()])
+						print 'After adding'
+						print partialPreCommitIDs
 				elif cmd == "crashPartialCommit" and isCoordinator:
 					crash.crashPartialCommit = True 
 					if l == cmd:
@@ -235,10 +247,10 @@ class ServerListener(Thread):
 
 	def run(self): 
 		global countDown, wait, crash, DTlog, died_coor, isCoordinator
-		global localstate, COOR_ID, alives, playlist, in3PC, num_3PC
+		global localstate, COOR_ID, alives, playlist, in3PC, num_3PC, states
 		self.conn, self.addr = self.sock.accept()
 		self.connected = True 
-		wait.waitForVoteReq = True
+		wait.waitForVoteReq = (not isCoordinator)
 		while True: 
 			if "\n" in self.buffer: 
 				(l, rest) = self.buffer.split("\n", 1)
@@ -257,7 +269,7 @@ class ServerListener(Thread):
 						else:
 							# ignore request from zombie coordinator
 							continue
-					wait.waitForStateReq = False
+					wait.reset()
 					_, command = DTlog[-1].split(None, 1)
 					reply(self.target_pid, "STATE {} {}".format(localstate, command))
 					wait.waitForStateResp = True
@@ -337,14 +349,20 @@ class ServerListener(Thread):
 						if statelog not in DTlog:
 							DTlog.append(statelog)
 						continue
-					reply(self.target_pid, "ACK {:d}\n".format(self.pid))
-					wait.waitForCommit = True
-					wait.waiting_cmd = message
-					countDown.begin()
+					else:
+						reply(self.target_pid, "ACK {:d}\n".format(self.pid))
+						wait.waitForCommit = True
+						wait.waiting_cmd = message
+						countDown.begin()
 				elif msgs[0] == "NO":
 					votes[self.target_pid] = False
 				elif msgs[0] == "YES": 
 					votes[self.target_pid] = True
+				elif msgs[0] == "ACK":
+					if wait.waitForACK:
+						wait.waitForACK = False
+						finish_commit(wait.waiting_cmd)
+						wait.waiting_cmd = ""
 				elif msgs[0] == "STATE":
 					_, info = l.split(None, 1)
 					# state response
@@ -363,11 +381,13 @@ class ServerListener(Thread):
 						raise ValueError 
 					# elif data.beginswith(STATERESP): 
 					# 	print str(self_pid) + " received " + data
-					if "STATERESP" in data: 
-						print str(self_pid) + " received " + data + " from " + str(self.target_pid)
+					# if "STATERESP" in data: 
+					# 	print str(self_pid) + " received " + data + " from " + str(self.target_pid)
 					self.buffer += data 
 				except Exception as e:
 					print str(self_pid) + " to " + str(self.target_pid) + " connection closed"
+					if wait.waitForState:
+						states[self.target_pid] = ""
 					self.conn.close()
 					self.conn = None 
 					self.conn, self.addr = self.sock.accept()
@@ -453,7 +473,7 @@ def remove_zombies(new_coor_id):
 
 
 def run_3PC(l):
-	global crash, votes, master_thread, DTlog, playlist
+	global crash, votes, master_thread, DTlog, playlist, countDown
 	global ack_reqs, wait, localstate, alives, in3PC, ABORT
 	if False in votes.values():
 		DTlog.append("ABORT {}\n".format(l))
@@ -480,6 +500,13 @@ def run_3PC(l):
 		crash.crashAfterAck = False
 		exit()
 		return
+	wait.waiting_cmd = l
+	wait.waitForACK = True
+	countDown.begin()
+
+
+def finish_commit(l, state_resp=False):
+	global master_thread, playlist, in3PC
 	args = l.split()
 	cmd, name = args[0], args[1]
 	# After receiving the ACKs
@@ -494,7 +521,7 @@ def run_3PC(l):
 		except:
 			pass
 	master_thread.master_conn.send("ack COMMIT\n")
-	commit(l)
+	commit(l, state_resp=state_resp)
 	in3PC = False
 
 
@@ -533,22 +560,27 @@ def timeout():
 					votes = {}
 				elif wait.waitForVoteReq:
 					print str(self_pid) + " Timeout waiting for vote requests"
-					DTlog.append("ABORT TIMEOUT VOTEREQ\n")
+					DTlog.append("ABORT VOTEREQ\n")
 					localstate = ABORT
 					wait.waitForVoteReq = False
 					return
 				elif wait.waitForPreCommit:
 					print str(self_pid) + " Timeout waiting for precommit"
-					DTlog.append("ABORT TIMEOUT PRECOMMIT\n")
+					# DTlog.append("ABORT TIMEOUT PRECOMMIT\n")
 					wait.waitForPreCommit = False
 					localstate = UNCERTAIN
 					run_election()
 				elif wait.waitForCommit:
 					print str(self_pid) + " Timeout waiting for commit"
-					DTlog.append("COMMIT TIMEOUT COMMIT\n")
+					# DTlog.append("COMMIT TIMEOUT COMMIT\n")
 					wait.waitForCommit = False
 					localstate = COMMITTABLE
 					run_election()
+				elif wait.waitForACK:
+					print str(self_pid) + " Timeout waiting for ACK"
+					wait.waitForACK = False
+					finish_commit(wait.waiting_cmd)
+					wait.waiting_cmd = ""
 			elif wait.waitForVote:
 				if not (vote_reqs - set(votes.keys())):
 					print str(self_pid) + " get all votes"
@@ -618,41 +650,44 @@ def run_3PC_termination():
 	global DTlog, localstate, states
 	uncertains = set()
 	statelog = DTlog[-1]
-	coor_state, val = statelog.split(None, 1)
+	coor_state, cmd = statelog.split(None, 1)
+	print cmd
 	if coor_state == ABORT:
 		print 'Coordinator decides ABORT'
-		abort(val, state_resp=True)
+		abort(cmd, state_resp=True)
 		return
-	uncertain_cmd = ""
 	uncertain_pids = set()
 	has_committable = False
 	for pid, info in states.items():
+		if not info:
+			# ignore process failures
+			continue
 		state, msg = info.split(None, 1)
 		# print "{} {} from {:d}".format(state, msg, pid)
 		if state == ABORT:
 			abort(msg, state_resp=True)
 			return
 		elif state == COMMIT:
-			commit(msg, state_resp=True)
+			finish_commit(msg, state_resp=True)
 			return
 		elif state == UNCERTAIN:
-			uncertain_cmd = msg
 			uncertain_pids.add(pid)
 		else:
 			has_committable = True
 	if coor_state == COMMIT:
-		commit(val, state_resp=True)
+		finish_commit(cmd, state_resp=True)
 		return
 	if not has_committable:
 		# all uncertain, abort
-		abort(uncertain_cmd, state_resp=True)
+		abort(cmd, state_resp=True)
 	else:
 		for pids in uncertain_pids:
 			# send precommit
-			msg = "STATERESP {} {}".format(PRECOMMIT, uncertain_cmd)
+			msg = "STATERESP {} {}".format(PRECOMMIT, cmd)
 			reply(pid, msg)
 			time.sleep(SLEEP)
-		commit(uncertain_cmd, state_resp=True)
+		finish_commit(cmd, state_resp=True)
+
 
 def broadcast(msg):
 	global clients, alives
@@ -666,7 +701,9 @@ def broadcast(msg):
 
 def commit(msg, state_resp=False):
 	global crash, DTlog, states, COMMIT, localstate, self_pid, partialCommitIDs
-	message = "COMMIT {}\n".format(msg)
+	if not msg.endswith('\n'):
+		msg = msg + '\n'
+	message = "COMMIT {}".format(msg)
 	DTlog.append(message)
 	localstate = COMMIT
 	if state_resp:
@@ -685,8 +722,10 @@ def commit(msg, state_resp=False):
 
 
 def pre_commit(msg, state_resp=False):
-	global crash, states, partialPrecommitIDs
-	message = "PRECOMMIT {}\n".format(msg)
+	global crash, states, partialPreCommitIDs
+	if not msg.endswith('\n'):
+		msg = msg + '\n'
+	message = "PRECOMMIT {}".format(msg)
 	if state_resp:
 		message = 'STATERESP ' + message
 		for pid in states:
@@ -694,7 +733,7 @@ def pre_commit(msg, state_resp=False):
 		return
 	if crash.crashPartialPreCommit:
 		crash.crashPartialPreCommit = False
-		for pid in partialPrecommitIDs:
+		for pid in partialPreCommitIDs:
 			print "{:d} to {:d} {}".format(self_pid, pid, message)
 			reply(pid, message)
 		exit()
@@ -703,7 +742,9 @@ def pre_commit(msg, state_resp=False):
 
 def abort(command, state_resp=False):
 	global votes, alives, clients, localstate, states, DTlog
-	message = "ABORT {}\n".format(command)
+	if not command.endswith('\n'):
+		command = command + '\n'
+	message = "ABORT {}".format(command)
 	DTlog.append(message)
 	localstate = ABORT
 	if state_resp:
@@ -736,11 +777,11 @@ def reply(target_pid, msg):
 	global clients	
 	clients[target_pid].send(msg)
 
-
 def write_DTlog():
-	global DTlog, DT_PATH, alives
+	global DTlog, DT_PATH, alives, localstate
 	with open(DT_PATH, 'wt') as file:
 		# Write all alive processes
+		file.write('CRASHSTATE {}\n'.format(localstate))
 		alive_ids = [str(pid) for pid in alives]
 		file.write('ALIVES {}\n'.format(' '.join(alive_ids)))
 		for line in DTlog:
@@ -759,13 +800,22 @@ def load_DTlog():
 	except:
 		pass
 
+def make_sure_path_exists(path):
+	try:
+		os.makedirs(path)
+	except OSError as e:
+		if e.errno != errno.EEXIST:
+			print("Error: Path couldn't be recognized!")
+			print(e)
+
 # Master -> commands to coordinator or ask the server to crash
 # n listeners and n clients:
 def main(pid, num_servers, port):
 	global master_thread, DT_PATH, self_pid, max_num_servers, countDown, wait, crash
 	self_pid = pid
 	max_num_servers = num_servers
-	DT_PATH = "DTlogs/{:d}_DTlog.txt".format(pid)
+	DT_PATH = "DTlogs/log{:d}.txt".format(pid)
+	make_sure_path_exists("DTlogs")
 	load_DTlog()
 	countDown = CountDown()
 	wait = Wait()
@@ -789,6 +839,7 @@ def exit():
 	master_thread.kill()
 	write_DTlog()
 	os._exit(0)
+
 
 if __name__ == '__main__':
 	args = sys.argv

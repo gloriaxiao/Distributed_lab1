@@ -7,3 +7,5 @@ if [ -z "$PIDS" ]
 	else
 		kill $PIDS
 fi
+rm -f DTlogs/*
+mkdir DTlogs
