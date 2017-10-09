@@ -520,14 +520,18 @@ def process_received_log(log):
 	for line in log:
 		if not line:
 			continue
+		print "line: " + line 
 		state, cmd = line.split(None, 1)
+		print "state: " + state + " cmd: " + cmd 
 		if cmd not in local_cmds:
 			DTlog.append(line)
 			if state == COMMIT:
 				localstate = COMMIT
 				# Commit on cmd
-				op, info = line.split(None, 1)
+				op, info = cmd.split(None, 1)
+				print op + " " + info 
 				if op == 'add':
+					# print str(self_id) + " adding to list"
 					name, url = info.split()
 					playlist[name] = url
 				else:
